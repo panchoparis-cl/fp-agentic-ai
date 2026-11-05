@@ -1,0 +1,21 @@
+.env
+.venv/
+__pycache__/
+*.py[cod]
+.langgraph_api/
+.pytest_cache/
+
+# Datos locales y artefactos de desarrollo
+data/
+local_data/
+*.db
+*.sqlite
+*.sqlite3
+*.csv
+*.parquet
+*.pkl
+*.pickle
+*.log
+.coverage
+.DS_Store
+Thumbs.db

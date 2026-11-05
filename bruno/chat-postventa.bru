@@ -1,0 +1,22 @@
+meta {
+  name: chat-postventa
+  type: http
+  seq: 3
+}
+
+post {
+  url: {{baseUrl}}/chat
+  body: json
+  auth: none
+}
+
+headers {
+  content-type: application/json
+}
+
+body:json {
+  {
+    "user_id": "bruno-postventa",
+    "texto": "Mi pedido 4521 llegó roto"
+  }
+}
