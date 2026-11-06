@@ -1,10 +1,12 @@
 import logging
 import os
+import hmac
 from contextlib import asynccontextmanager
 from typing import Any, Literal
 
+import httpx
 from dotenv import load_dotenv
-from fastapi import Body, FastAPI, HTTPException, Request
+from fastapi import FastAPI, Header, HTTPException, Request
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -92,7 +94,7 @@ app = FastAPI(
     openapi_tags=[
         {"name": "salud", "description": "Estado y configuración de la API."},
         {"name": "chat", "description": "Enrutamiento de mensajes del chat ecommerce."},
-        {"name": "telegram", "description": "Webhook de Telegram (pendiente de implementación)."},
+        {"name": "telegram", "description": "Webhook de Telegram."},
     ],
     lifespan=lifespan,
 )
@@ -150,5 +152,75 @@ async def chat(entrada: ChatRequest, request: Request) -> ChatResponse:
     include_in_schema=False,
     tags=["telegram"],
 )
-async def telegram(payload: Any = Body(...)) -> dict[str, bool]:
+async def telegram(
+    request: Request,
+    secret_header: str | None = Header(default=None, alias="X-Telegram-Bot-Api-Secret-Token"),
+) -> dict[str, bool]:
+    secreto_configurado = os.getenv("TELEGRAM_SECRET", "")
+    if not secreto_configurado or not secret_header or not hmac.compare_digest(
+        secreto_configurado.encode("utf-8"), secret_header.encode("utf-8")
+    ):
+        logger.warning("Webhook de Telegram rechazado: secreto inválido o ausente")
+        raise HTTPException(status_code=403, detail="Secreto de webhook inválido")
+
+    try:
+        update = await request.json()
+    except ValueError:
+        logger.warning("Telegram envió un body que no es JSON válido")
+        return {"ok": True}
+
+    if not isinstance(update, dict):
+        return {"ok": True}
+    message = update.get("message")
+    if not isinstance(message, dict):
+        return {"ok": True}
+    chat = message.get("chat")
+    chat_id = chat.get("id") if isinstance(chat, dict) else None
+    texto = message.get("text")
+    if chat_id is None or not isinstance(texto, str) or not texto.strip():
+        return {"ok": True}
+
+    token = os.getenv("TELEGRAM_TOKEN", "")
+    if not token:
+        logger.error("TELEGRAM_TOKEN no está configurado; se confirma el update sin procesarlo")
+        return {"ok": True}
+
+    try:
+        estado = await request.app.state.router_graph.ainvoke(
+            {
+                "mensaje": texto,
+                "messages": [HumanMessage(content=texto)],
+            },
+            config={"configurable": {"thread_id": str(chat_id)}},
+        )
+    except Exception:
+        logger.exception("Falló el grafo al procesar un mensaje de Telegram (chat_id=%s)", chat_id)
+        return {"ok": True}
+
+    ruta = estado.get("ruta", "desconocida")
+    motivo = estado.get("motivo", "")
+    respuesta = str(estado.get("respuesta", ""))
+    logger.info("Telegram chat_id=%s ruta=%s motivo=%s", chat_id, ruta, motivo)
+
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as cliente:
+            response = await cliente.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                json={"chat_id": chat_id, "text": respuesta},
+            )
+            response.raise_for_status()
+            resultado = response.json()
+            if not isinstance(resultado, dict) or resultado.get("ok") is not True:
+                logger.error("Telegram sendMessage no aceptó el mensaje (chat_id=%s)", chat_id)
+    except httpx.HTTPError as error:
+        # No imprimir el texto del error: su URL puede contener el token del bot.
+        logger.error(
+            "Telegram sendMessage falló (chat_id=%s, error=%s, status=%s)",
+            chat_id,
+            type(error).__name__,
+            getattr(getattr(error, "response", None), "status_code", None),
+        )
+    except Exception as error:
+        logger.error("Telegram sendMessage falló (chat_id=%s, error=%s)", chat_id, type(error).__name__)
+
     return {"ok": True}

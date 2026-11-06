@@ -22,9 +22,87 @@ def test_api_salud_y_validacion_chat():
     assert cliente.post("/chat", json={"user_id": "cliente-1"}).status_code == 422
 
 
-def test_api_telegram_acepta_cualquier_json():
-    cliente = TestClient(app)
-    assert cliente.post("/telegram", json={"update_id": 123}).json() == {"ok": True}
+def test_api_telegram_rechaza_secreto_incorrecto(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_SECRET", "secreto-prueba")
+    with TestClient(app) as cliente:
+        respuesta = cliente.post("/telegram", json={"update_id": 123})
+    assert respuesta.status_code == 403
+
+
+def test_api_telegram_enruta_y_responde_con_httpx(monkeypatch):
+    import api.app as modulo_api
+
+    monkeypatch.setenv("TELEGRAM_SECRET", "secreto-prueba")
+    monkeypatch.setenv("TELEGRAM_TOKEN", "token-prueba")
+    llamadas = {}
+
+    class GrafoFalso:
+        async def ainvoke(self, entrada, config):
+            llamadas["entrada"] = entrada
+            llamadas["config"] = config
+            return {
+                "ruta": "preventa",
+                "motivo": "Consulta por producto.",
+                "respuesta": "Soy el agente de preventa.",
+            }
+
+    class RespuestaFalsa:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"ok": True, "result": {"message_id": 5}}
+
+    class ClienteHttpFalso:
+        def __init__(self, timeout):
+            llamadas["timeout"] = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def post(self, url, json):
+            llamadas["url"] = url
+            llamadas["body"] = json
+            return RespuestaFalsa()
+
+    monkeypatch.setattr(modulo_api, "crear_router", GrafoFalso)
+    monkeypatch.setattr(modulo_api.httpx, "AsyncClient", ClienteHttpFalso)
+    with TestClient(app) as cliente:
+        respuesta = cliente.post(
+            "/telegram",
+            headers={"X-Telegram-Bot-Api-Secret-Token": "secreto-prueba"},
+            json={"update_id": 123, "message": {"chat": {"id": 9876}, "text": "¿Tienen poleras?"}},
+        )
+
+    assert respuesta.status_code == 200
+    assert respuesta.json() == {"ok": True}
+    assert llamadas["config"]["configurable"]["thread_id"] == "9876"
+    assert llamadas["entrada"]["mensaje"] == "¿Tienen poleras?"
+    assert llamadas["url"] == "https://api.telegram.org/bottoken-prueba/sendMessage"
+    assert llamadas["body"] == {"chat_id": 9876, "text": "Soy el agente de preventa."}
+
+
+def test_api_telegram_ignora_update_sin_texto(monkeypatch):
+    import api.app as modulo_api
+
+    monkeypatch.setenv("TELEGRAM_SECRET", "secreto-prueba")
+
+    class GrafoNoUsado:
+        async def ainvoke(self, *args, **kwargs):
+            raise AssertionError("No debe invocar el grafo para updates sin texto")
+
+    monkeypatch.setattr(modulo_api, "crear_router", GrafoNoUsado)
+    with TestClient(app) as cliente:
+        respuesta = cliente.post(
+            "/telegram",
+            headers={"X-Telegram-Bot-Api-Secret-Token": "secreto-prueba"},
+            json={"update_id": 124, "message": {"chat": {"id": 9876}, "photo": []}},
+        )
+    assert respuesta.status_code == 200
+    assert respuesta.json() == {"ok": True}
 
 
 def test_swagger_documentado_y_sin_telegram():
