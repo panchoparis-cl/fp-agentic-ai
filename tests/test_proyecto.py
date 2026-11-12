@@ -16,10 +16,15 @@ def test_grafo_sin_credenciales():
     assert resultado["messages"][-1].content == "Eco: hola"
 
 
-def test_api_salud_y_validacion_chat():
+def test_api_salud_y_validacion_chat(monkeypatch):
+    monkeypatch.setenv("API_KEY", "clave-prueba")
     cliente = TestClient(app)
     assert cliente.get("/health").json() == {"ok": True, "modelo": MODELO}
-    assert cliente.post("/chat", json={"user_id": "cliente-1"}).status_code == 422
+    assert cliente.post(
+        "/chat",
+        headers={"X-API-Key": "clave-prueba"},
+        json={"user_id": "cliente-1"},
+    ).status_code == 422
 
 
 def test_api_telegram_rechaza_secreto_incorrecto(monkeypatch):
@@ -112,6 +117,9 @@ def test_swagger_documentado_y_sin_telegram():
     assert "/chat" in esquema["paths"]
     assert "/telegram" not in esquema["paths"]
     assert {"salud", "chat", "telegram"}.issubset({tag["name"] for tag in esquema["tags"]})
+    chat = esquema["paths"]["/chat"]["post"]
+    assert {"APIKeyHeader": []} in chat["security"]
+    assert esquema["components"]["securitySchemes"]["APIKeyHeader"]["name"] == "X-API-Key"
 
 
 def test_saltos_del_grafo():
@@ -130,8 +138,13 @@ def test_api_invocacion_sin_servicio_externo(monkeypatch):
             return Decision(ruta="generica", motivo="Es una consulta de prueba.")
 
     monkeypatch.setattr(modulo_api, "crear_router", lambda: crear_router(modelo=RouterFalso()))
+    monkeypatch.setenv("API_KEY", "clave-prueba")
     with TestClient(app) as cliente:
-        respuesta = cliente.post("/chat", json={"user_id": "cliente-1", "texto": "hola"})
+        respuesta = cliente.post(
+            "/chat",
+            headers={"X-API-Key": "clave-prueba"},
+            json={"user_id": "cliente-1", "texto": "hola"},
+        )
     assert respuesta.status_code == 200
     assert respuesta.json()["ruta"] == "generica"
     assert respuesta.json()["motivo"] == "Es una consulta de prueba."
@@ -146,8 +159,13 @@ def test_api_modelo_falla_devuelve_502_seguro(monkeypatch, caplog):
             raise RuntimeError("detalle interno con GOOGLE_API_KEY=secreto")
 
     monkeypatch.setattr(modulo_api, "crear_router", GrafoFallido)
+    monkeypatch.setenv("API_KEY", "clave-prueba")
     with TestClient(app) as cliente:
-        respuesta = cliente.post("/chat", json={"user_id": "cliente-1", "texto": "hola"})
+        respuesta = cliente.post(
+            "/chat",
+            headers={"X-API-Key": "clave-prueba"},
+            json={"user_id": "cliente-1", "texto": "hola"},
+        )
     assert respuesta.status_code == 502
     assert "secreto" not in respuesta.text
     assert "stack trace" not in respuesta.text.lower()

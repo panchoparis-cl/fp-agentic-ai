@@ -1,12 +1,14 @@
 import logging
 import os
 import hmac
+import secrets
 from contextlib import asynccontextmanager
 from typing import Any, Literal
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi.security import APIKeyHeader
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -16,6 +18,20 @@ from src.router.graph import crear_grafo as crear_router
 load_dotenv()
 logger = logging.getLogger(__name__)
 MODELO = os.getenv("MODELO") or "gemini-3.5-flash-lite"
+API_KEY_HEADER = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+
+async def verificar_api_key(api_key: str | None = Depends(API_KEY_HEADER)) -> None:
+    clave_configurada = os.getenv("API_KEY", "")
+    if (
+        not clave_configurada
+        or not api_key
+        or not secrets.compare_digest(api_key.encode("utf-8"), clave_configurada.encode("utf-8"))
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="Clave de API ausente o inválida. Envía una clave válida en la cabecera X-API-Key.",
+        )
 
 
 class ChatRequest(BaseModel):
@@ -118,6 +134,7 @@ async def health() -> dict[str, Any]:
     description="Clasifica el mensaje y lo envía al agente preventa, postventa o generica.",
     responses={
         200: {"description": "Mensaje clasificado y respuesta del agente."},
+        401: {"description": "Falta la clave de API o no es válida."},
         422: {"description": "El body no cumple el esquema requerido (user_id y texto)."},
         502: {
             "model": ErrorResponse,
@@ -125,7 +142,11 @@ async def health() -> dict[str, Any]:
         },
     },
 )
-async def chat(entrada: ChatRequest, request: Request) -> ChatResponse:
+async def chat(
+    entrada: ChatRequest,
+    request: Request,
+    _api_key: None = Depends(verificar_api_key),
+) -> ChatResponse:
     try:
         estado = await request.app.state.router_graph.ainvoke(
             {
